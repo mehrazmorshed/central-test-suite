@@ -3,7 +3,32 @@
 set -uo pipefail
 
 ########################################
-# 0. Input validation & argument parsing
+# 0. Configuration & Constants
+########################################
+
+# Define excluded directories as an array for consistency
+EXCLUDE_DIRS=(
+    "node_modules"
+    ".git"
+    ".github"
+    "vendor"
+    "tests"
+    "dist"
+    "build"
+    "security-reports"
+)
+
+# Build find exclusion patterns dynamically
+FIND_EXCLUDES=""
+for dir in "${EXCLUDE_DIRS[@]}"; do
+    FIND_EXCLUDES="${FIND_EXCLUDES} ! -path '*/${dir}/*'"
+done
+
+# Build grep exclusion pattern dynamically
+GREP_EXCLUDES="/($(IFS="|"; echo "${EXCLUDE_DIRS[*]}"))"
+
+########################################
+# 1. Input validation & argument parsing
 ########################################
 
 PLUGIN_ROOT=""
@@ -35,7 +60,7 @@ if [ -z "$PLUGIN_ROOT" ]; then
 fi
 
 ########################################
-# 1. Resolve paths safely
+# 2. Resolve paths safely
 ########################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +86,7 @@ REPORT_DIR="$REPORT_BASE/$PLUGIN_NAME"
 mkdir -p "$REPORT_DIR"
 
 ########################################
-# 2. Header
+# 3. Header
 ########################################
 
 echo ""
@@ -74,15 +99,18 @@ echo "📂 Plugin root: $PLUGIN_ROOT"
 echo "📋 Reports directory: $REPORT_DIR"
 echo "🕐 Started: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "────────────────────────────────────────────────────────────────────"
+echo "🔍 Excluded directories: ${EXCLUDE_DIRS[*]}"
+echo "────────────────────────────────────────────────────────────────────"
 
 ########################################
-# 3. Statistics
+# 4. Statistics
 ########################################
 
 echo "➡️  Gathering plugin statistics..."
 
-TOTAL_PHP_FILES=$(find "$PLUGIN_ROOT" -type f -name "*.php" ! -path "*/node_modules/*" ! -path "*/vendor/*" ! -path "*/.git/*" | wc -l | tr -d ' ')
-TOTAL_PHP_LINES=$(find "$PLUGIN_ROOT" -type f -name "*.php" ! -path "*/node_modules/*" ! -path "*/vendor/*" ! -path "*/.git/*" -exec cat {} \; 2>/dev/null | wc -l | tr -d ' ')
+# Use eval for dynamic find exclusions
+TOTAL_PHP_FILES=$(eval "find \"\$PLUGIN_ROOT\" -type f -name \"*.php\" $FIND_EXCLUDES" | wc -l | tr -d ' ')
+TOTAL_PHP_LINES=$(eval "find \"\$PLUGIN_ROOT\" -type f -name \"*.php\" $FIND_EXCLUDES -exec cat {} \;" 2>/dev/null | wc -l | tr -d ' ')
 
 cat > "$REPORT_DIR/00-statistics.txt" <<EOF
 Plugin Statistics
@@ -90,13 +118,14 @@ Plugin Statistics
 Plugin Name: $PLUGIN_NAME
 Total PHP Files: $TOTAL_PHP_FILES
 Total PHP Lines: $TOTAL_PHP_LINES
+Excluded Directories: ${EXCLUDE_DIRS[*]}
 Analysis Date: $(date '+%Y-%m-%d %H:%M:%S')
 EOF
 
 echo "   ✓ Found $TOTAL_PHP_FILES PHP files ($TOTAL_PHP_LINES lines)"
 
 ########################################
-# 4. Direct access protection check
+# 5. Direct access protection check
 ########################################
 
 echo "➡️  Checking ABSPATH / WPINC guards..."
@@ -113,14 +142,14 @@ php <<PHP > "$REPORT_DIR/01-missing-abspath-guards.txt"
 );
 
 \$skipDirs = [
-    DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR,
     DIRECTORY_SEPARATOR . 'node_modules' . DIRECTORY_SEPARATOR,
     DIRECTORY_SEPARATOR . '.git' . DIRECTORY_SEPARATOR,
     DIRECTORY_SEPARATOR . '.github' . DIRECTORY_SEPARATOR,
-    DIRECTORY_SEPARATOR . 'security-reports' . DIRECTORY_SEPARATOR,
-    DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR,
+    DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR,
     DIRECTORY_SEPARATOR . 'tests' . DIRECTORY_SEPARATOR,
+    DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR,
     DIRECTORY_SEPARATOR . 'build' . DIRECTORY_SEPARATOR,
+    DIRECTORY_SEPARATOR . 'security-reports' . DIRECTORY_SEPARATOR,
 ];
 
 echo "Missing ABSPATH/WPINC Guards\n";
@@ -173,7 +202,7 @@ else
 fi
 
 ########################################
-# 5. High-risk functions scan
+# 6. High-risk functions scan
 ########################################
 
 echo "➡️  Scanning for dangerous functions..."
@@ -188,7 +217,7 @@ echo "➡️  Scanning for dangerous functions..."
 HIGH_RISK_COUNT=0
 
 for func in "eval" "exec" "shell_exec" "passthru" "system" "popen" "proc_open" "base64_decode"; do
-    MATCHES=$(grep -rn --include="*.php" "\b${func}\s*(" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || true)
+    MATCHES=$(grep -rn --include="*.php" "\b${func}\s*(" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || true)
     if [ -n "$MATCHES" ]; then
         echo "🔴 $func() found:" >> "$REPORT_DIR/02-high-risk-functions.txt"
         echo "$MATCHES" | while read -r line; do
@@ -209,7 +238,7 @@ else
 fi
 
 ########################################
-# 6. SQL Injection vulnerability scan
+# 7. SQL Injection vulnerability scan
 ########################################
 
 echo "➡️  Scanning for SQL injection vulnerabilities..."
@@ -224,25 +253,25 @@ echo "➡️  Scanning for SQL injection vulnerabilities..."
 {
     echo "Direct \$wpdb queries (potential SQL injection):"
     echo "------------------------------------------------"
-    grep -rn --include="*.php" '\$wpdb->query(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\$wpdb->query(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "Direct \$wpdb->get_* calls:"
     echo "--------------------------"
-    grep -rn --include="*.php" '\$wpdb->get_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | grep -v "get_blog_prefix\|get_charset_collate" || echo "None found"
+    grep -rn --include="*.php" '\$wpdb->get_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | grep -v "get_blog_prefix\|get_charset_collate" || echo "None found"
     echo ""
     
     echo "\$wpdb->prepare() usage (GOOD):"
     echo "------------------------------"
-    PREPARE_COUNT=$(grep -rn --include="*.php" '\$wpdb->prepare' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+    PREPARE_COUNT=$(grep -rn --include="*.php" '\$wpdb->prepare' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
     echo "Found $PREPARE_COUNT uses of \$wpdb->prepare()"
 } >> "$REPORT_DIR/03-sql-injection.txt"
 
-DIRECT_QUERIES=$(grep -rn --include="*.php" '\$wpdb->query(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+DIRECT_QUERIES=$(grep -rn --include="*.php" '\$wpdb->query(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 echo "   Found $DIRECT_QUERIES direct \$wpdb->query() calls"
 
 ########################################
-# 7. XSS vulnerability scan
+# 8. XSS vulnerability scan
 ########################################
 
 echo "➡️  Scanning for XSS vulnerabilities..."
@@ -254,27 +283,27 @@ echo "➡️  Scanning for XSS vulnerabilities..."
     
     echo "Unescaped echo statements (potential XSS):"
     echo "------------------------------------------"
-    grep -rn --include="*.php" 'echo \$' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | head -50 || echo "None found"
+    grep -rn --include="*.php" 'echo \$' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | head -50 || echo "None found"
     echo ""
     
     echo "phpcs:ignore comments (bypassed checks):"
     echo "----------------------------------------"
-    grep -rn --include="*.php" 'phpcs:ignore' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'phpcs:ignore' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "Escaping function usage summary:"
     echo "--------------------------------"
-    echo "esc_html(): $(grep -r --include="*.php" 'esc_html(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "esc_attr(): $(grep -r --include="*.php" 'esc_attr(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "esc_url(): $(grep -r --include="*.php" 'esc_url(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "wp_kses*(): $(grep -r --include="*.php" 'wp_kses' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
+    echo "esc_html(): $(grep -r --include="*.php" 'esc_html(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "esc_attr(): $(grep -r --include="*.php" 'esc_attr(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "esc_url(): $(grep -r --include="*.php" 'esc_url(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "wp_kses*(): $(grep -r --include="*.php" 'wp_kses' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
 } > "$REPORT_DIR/04-xss-vulnerabilities.txt"
 
-PHPCS_IGNORE=$(grep -rn --include="*.php" 'phpcs:ignore' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+PHPCS_IGNORE=$(grep -rn --include="*.php" 'phpcs:ignore' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 echo "   Found $PHPCS_IGNORE phpcs:ignore comments"
 
 ########################################
-# 8. User input handling scan
+# 9. User input handling scan
 ########################################
 
 echo "➡️  Scanning user input handling..."
@@ -286,33 +315,33 @@ echo "➡️  Scanning user input handling..."
     
     echo "\$_GET usage:"
     echo "------------"
-    grep -rn --include="*.php" '\$_GET\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\$_GET\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "\$_POST usage:"
     echo "-------------"
-    grep -rn --include="*.php" '\$_POST\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\$_POST\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "\$_REQUEST usage:"
     echo "----------------"
-    grep -rn --include="*.php" '\$_REQUEST\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\$_REQUEST\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "Sanitization function usage:"
     echo "----------------------------"
-    echo "sanitize_text_field(): $(grep -r --include="*.php" 'sanitize_text_field(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "sanitize_email(): $(grep -r --include="*.php" 'sanitize_email(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "absint(): $(grep -r --include="*.php" 'absint(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "wp_unslash(): $(grep -r --include="*.php" 'wp_unslash(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
+    echo "sanitize_text_field(): $(grep -r --include="*.php" 'sanitize_text_field(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "sanitize_email(): $(grep -r --include="*.php" 'sanitize_email(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "absint(): $(grep -r --include="*.php" 'absint(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "wp_unslash(): $(grep -r --include="*.php" 'wp_unslash(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
 } > "$REPORT_DIR/05-user-input-handling.txt"
 
-GET_USAGE=$(grep -rn --include="*.php" '\$_GET\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
-POST_USAGE=$(grep -rn --include="*.php" '\$_POST\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+GET_USAGE=$(grep -rn --include="*.php" '\$_GET\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
+POST_USAGE=$(grep -rn --include="*.php" '\$_POST\[' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 echo "   Found $GET_USAGE \$_GET and $POST_USAGE \$_POST usages"
 
 ########################################
-# 9. AJAX handlers scan
+# 10. AJAX handlers scan
 ########################################
 
 echo "➡️  Scanning AJAX & REST handlers..."
@@ -324,20 +353,20 @@ echo "➡️  Scanning AJAX & REST handlers..."
     
     echo "wp_ajax_ handlers (authenticated):"
     echo "-----------------------------------"
-    grep -rn --include="*.php" "add_action.*wp_ajax_[^n]" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" "add_action.*wp_ajax_[^n]" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "wp_ajax_nopriv_ handlers (PUBLIC - verify security!):"
     echo "------------------------------------------------------"
-    grep -rn --include="*.php" "wp_ajax_nopriv_" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" "wp_ajax_nopriv_" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "REST API routes:"
     echo "----------------"
-    grep -rn --include="*.php" "register_rest_route" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" "register_rest_route" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
 } > "$REPORT_DIR/06-ajax-rest-handlers.txt"
 
-NOPRIV_AJAX=$(grep -rn --include="*.php" "wp_ajax_nopriv_" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+NOPRIV_AJAX=$(grep -rn --include="*.php" "wp_ajax_nopriv_" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 if [ "$NOPRIV_AJAX" -gt 0 ]; then
     echo "   ⚠️  Found $NOPRIV_AJAX public (nopriv) AJAX handlers"
 else
@@ -345,7 +374,7 @@ else
 fi
 
 ########################################
-# 10. Nonce & capability checks
+# 11. Nonce & capability checks
 ########################################
 
 echo "➡️  Scanning nonce & capability checks..."
@@ -357,27 +386,27 @@ echo "➡️  Scanning nonce & capability checks..."
     
     echo "Nonce verification:"
     echo "-------------------"
-    echo "wp_verify_nonce(): $(grep -r --include="*.php" 'wp_verify_nonce' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "check_admin_referer(): $(grep -r --include="*.php" 'check_admin_referer' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
-    echo "check_ajax_referer(): $(grep -r --include="*.php" 'check_ajax_referer' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
+    echo "wp_verify_nonce(): $(grep -r --include="*.php" 'wp_verify_nonce' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "check_admin_referer(): $(grep -r --include="*.php" 'check_admin_referer' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
+    echo "check_ajax_referer(): $(grep -r --include="*.php" 'check_ajax_referer' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
     echo ""
     
     echo "Capability checks:"
     echo "------------------"
-    echo "current_user_can(): $(grep -r --include="*.php" 'current_user_can(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ') uses"
+    echo "current_user_can(): $(grep -r --include="*.php" 'current_user_can(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ') uses"
     echo ""
     
     echo "Nonce verification locations:"
     echo "-----------------------------"
-    grep -rn --include="*.php" 'wp_verify_nonce' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'wp_verify_nonce' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
 } > "$REPORT_DIR/07-nonce-capability-checks.txt"
 
-NONCE_COUNT=$(grep -r --include="*.php" 'wp_verify_nonce\|check_admin_referer\|check_ajax_referer' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ')
-CAP_COUNT=$(grep -r --include="*.php" 'current_user_can(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules)/" | wc -l | tr -d ' ')
+NONCE_COUNT=$(grep -r --include="*.php" 'wp_verify_nonce\|check_admin_referer\|check_ajax_referer' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
+CAP_COUNT=$(grep -r --include="*.php" 'current_user_can(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 echo "   Found $NONCE_COUNT nonce checks and $CAP_COUNT capability checks"
 
 ########################################
-# 11. Deprecated functions scan
+# 12. Deprecated functions scan
 ########################################
 
 echo "➡️  Scanning for deprecated functions..."
@@ -389,25 +418,25 @@ echo "➡️  Scanning for deprecated functions..."
     
     echo "FILTER_SANITIZE_STRING (deprecated PHP 8.1+):"
     echo "----------------------------------------------"
-    grep -rn --include="*.php" 'FILTER_SANITIZE_STRING' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'FILTER_SANITIZE_STRING' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "mysql_* functions (deprecated):"
     echo "-------------------------------"
-    grep -rn --include="*.php" '\bmysql_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\bmysql_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "ereg() function (deprecated):"
     echo "-----------------------------"
-    grep -rn --include="*.php" '\bereg(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\bereg(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "create_function() (deprecated PHP 7.2+):"
     echo "----------------------------------------"
-    grep -rn --include="*.php" 'create_function(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'create_function(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
 } > "$REPORT_DIR/08-deprecated-functions.txt"
 
-DEPRECATED=$(grep -rn --include="*.php" 'FILTER_SANITIZE_STRING\|mysql_\|ereg(\|create_function(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+DEPRECATED=$(grep -rn --include="*.php" 'FILTER_SANITIZE_STRING\|mysql_\|ereg(\|create_function(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 if [ "$DEPRECATED" -gt 0 ]; then
     echo "   ⚠️  Found $DEPRECATED deprecated function usages"
 else
@@ -415,7 +444,7 @@ else
 fi
 
 ########################################
-# 12. Object Injection scan
+# 13. Object Injection scan
 ########################################
 
 echo "➡️  Scanning for object injection vulnerabilities..."
@@ -427,15 +456,15 @@ echo "➡️  Scanning for object injection vulnerabilities..."
     
     echo "unserialize() usage (potential object injection):"
     echo "--------------------------------------------------"
-    grep -rn --include="*.php" '\bunserialize(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\bunserialize(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "maybe_unserialize() usage (safer):"
     echo "-----------------------------------"
-    grep -rn --include="*.php" 'maybe_unserialize(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'maybe_unserialize(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
 } > "$REPORT_DIR/09-object-injection.txt"
 
-UNSERIALIZE=$(grep -rn --include="*.php" '\bunserialize(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+UNSERIALIZE=$(grep -rn --include="*.php" '\bunserialize(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 if [ "$UNSERIALIZE" -gt 0 ]; then
     echo "   ⚠️  Found $UNSERIALIZE unserialize() calls"
 else
@@ -443,7 +472,7 @@ else
 fi
 
 ########################################
-# 13. Hardcoded credentials scan
+# 14. Hardcoded credentials scan
 ########################################
 
 echo "➡️  Scanning for hardcoded credentials..."
@@ -455,15 +484,15 @@ echo "➡️  Scanning for hardcoded credentials..."
     
     echo "Potential API keys/secrets:"
     echo "---------------------------"
-    grep -rn --include="*.php" -iE "(api[_-]?key|secret[_-]?key|password|token|auth)\s*[=:>]\s*['\"][a-zA-Z0-9]" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | head -30 || echo "None found"
+    grep -rn --include="*.php" -iE "(api[_-]?key|secret[_-]?key|password|token|auth)\s*[=:>]\s*['\"][a-zA-Z0-9]" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | head -30 || echo "None found"
     echo ""
     
     echo "define() with potential secrets:"
     echo "---------------------------------"
-    grep -rn --include="*.php" -iE "define\s*\(\s*['\"].*?(KEY|SECRET|TOKEN|PASSWORD)" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" -iE "define\s*\(\s*['\"].*?(KEY|SECRET|TOKEN|PASSWORD)" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
 } > "$REPORT_DIR/10-hardcoded-credentials.txt"
 
-HARDCODED=$(grep -rn --include="*.php" -iE "(api[_-]?key|secret|password|token)\s*[=:>]\s*['\"][a-zA-Z0-9]" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+HARDCODED=$(grep -rn --include="*.php" -iE "(api[_-]?key|secret|password|token)\s*[=:>]\s*['\"][a-zA-Z0-9]" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 if [ "$HARDCODED" -gt 0 ]; then
     echo "   ⚠️  Found $HARDCODED potential hardcoded credentials"
 else
@@ -471,7 +500,7 @@ else
 fi
 
 ########################################
-# 14. File operations scan
+# 15. File operations scan
 ########################################
 
 echo "➡️  Scanning file operations..."
@@ -483,24 +512,24 @@ echo "➡️  Scanning file operations..."
     
     echo "file_put_contents():"
     echo "--------------------"
-    grep -rn --include="*.php" 'file_put_contents(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'file_put_contents(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "file_get_contents():"
     echo "--------------------"
-    grep -rn --include="*.php" 'file_get_contents(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'file_get_contents(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "fopen()/fwrite():"
     echo "-----------------"
-    grep -rn --include="*.php" '\bfopen(\|\bfwrite(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\bfopen(\|\bfwrite(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
 } > "$REPORT_DIR/11-file-operations.txt"
 
-FILE_OPS=$(grep -rn --include="*.php" 'file_put_contents(\|file_get_contents(\|fopen(\|fwrite(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+FILE_OPS=$(grep -rn --include="*.php" 'file_put_contents(\|file_get_contents(\|fopen(\|fwrite(' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 echo "   Found $FILE_OPS file operation calls"
 
 ########################################
-# 15. Remote requests scan
+# 16. Remote requests scan
 ########################################
 
 echo "➡️  Scanning remote HTTP requests..."
@@ -512,24 +541,24 @@ echo "➡️  Scanning remote HTTP requests..."
     
     echo "wp_remote_* (WordPress HTTP API):"
     echo "----------------------------------"
-    grep -rn --include="*.php" 'wp_remote_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" 'wp_remote_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "curl functions:"
     echo "---------------"
-    grep -rn --include="*.php" '\bcurl_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" '\bcurl_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
     echo ""
     
     echo "Remote URLs in code:"
     echo "--------------------"
-    grep -rn --include="*.php" -E "https?://[^'\"\s]+" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/|wordpress\.org|w3\.org|schema\.org|openweathermap\.org|weatherapi\.com" | head -20 || echo "None found"
+    grep -rn --include="*.php" -E "https?://[^'\"\s]+" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES|wordpress\.org|w3\.org|schema\.org|openweathermap\.org|weatherapi\.com" | head -20 || echo "None found"
 } > "$REPORT_DIR/12-remote-requests.txt"
 
-REMOTE_CALLS=$(grep -rn --include="*.php" 'wp_remote_\|curl_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" | wc -l | tr -d ' ')
+REMOTE_CALLS=$(grep -rn --include="*.php" 'wp_remote_\|curl_' "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" | wc -l | tr -d ' ')
 echo "   Found $REMOTE_CALLS remote HTTP calls"
 
 ########################################
-# 16. Uninstall safety check
+# 17. Uninstall safety check
 ########################################
 
 echo "➡️  Checking uninstall safety..."
@@ -552,7 +581,7 @@ echo "➡️  Checking uninstall safety..."
     
     echo "register_uninstall_hook usage:"
     echo "------------------------------"
-    grep -rn --include="*.php" "register_uninstall_hook" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "/(vendor|node_modules|tests|dist|build|security-reports)/" || echo "None found"
+    grep -rn --include="*.php" "register_uninstall_hook" "$PLUGIN_ROOT" 2>/dev/null | grep -vE "$GREP_EXCLUDES" || echo "None found"
 } > "$REPORT_DIR/13-uninstall-safety.txt"
 
 if [ -f "$PLUGIN_ROOT/uninstall.php" ]; then
@@ -562,7 +591,7 @@ else
 fi
 
 ########################################
-# 17. Generate Summary Report
+# 18. Generate Summary Report
 ########################################
 
 echo "➡️  Generating summary report..."
@@ -575,6 +604,7 @@ echo "➡️  Generating summary report..."
     echo "Plugin: $PLUGIN_NAME"
     echo "Analysis Date: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "Plugin Path: $PLUGIN_ROOT"
+    echo "Excluded Directories: ${EXCLUDE_DIRS[*]}"
     echo ""
     echo "════════════════════════════════════════════════════════════════════"
     echo "STATISTICS"
