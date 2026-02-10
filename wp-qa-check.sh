@@ -3,15 +3,49 @@
 set -euo pipefail
 
 ########################################
-# 0. Input validation
+# 0. Input validation & argument parsing
 ########################################
 
-if [ $# -ne 1 ]; then
-    echo "❌ Usage: $0 <path-to-plugin>"
+# Default PHP version
+PHP_VERSION="7.2"
+
+# Parse arguments
+PLUGIN_ROOT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --php=*)
+            PHP_VERSION="${1#*=}"
+            shift
+            ;;
+        --php)
+            PHP_VERSION="$2"
+            shift 2
+            ;;
+        -*)
+            echo "❌ Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            if [ -z "$PLUGIN_ROOT" ]; then
+                PLUGIN_ROOT="$1"
+            else
+                echo "❌ Multiple plugin paths provided"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$PLUGIN_ROOT" ]; then
+    echo "❌ Usage: $0 <path-to-plugin> [--php=VERSION]"
     echo
-    echo "Example:"
+    echo "Examples:"
     echo "  $0 /Applications/MAMP/htdocs/ftl-lw/wp-content/plugins/location-weather"
-    echo "  $0 ../wp-content/plugins/my-plugin"
+    echo "  $0 ../wp-content/plugins/my-plugin --php=7.4"
+    echo "  $0 ../wp-content/plugins/my-plugin --php 8.0"
+    echo
+    echo "Default PHP version: 7.2"
     exit 1
 fi
 
@@ -21,10 +55,10 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ "$1" = /* ]]; then
-    PLUGIN_ROOT="$(cd "$1" && pwd)"
+if [[ "$PLUGIN_ROOT" = /* ]]; then
+    PLUGIN_ROOT="$(cd "$PLUGIN_ROOT" && pwd)"
 else
-    PLUGIN_ROOT="$(cd "$SCRIPT_DIR/$1" && pwd)"
+    PLUGIN_ROOT="$(cd "$SCRIPT_DIR/$PLUGIN_ROOT" && pwd)"
 fi
 
 if [ ! -d "$PLUGIN_ROOT" ]; then
@@ -48,6 +82,7 @@ echo "🔍 Running WordPress Plugin QA"
 echo "📁 Plugin: $PLUGIN_NAME"
 echo "📂 Plugin root: $PLUGIN_ROOT"
 echo "📋 Reports directory: $REPORT_DIR"
+echo "🐘 PHP Version: $PHP_VERSION"
 echo "----------------------------------------"
 
 ########################################
@@ -105,14 +140,14 @@ foreach (\$rii as \$file) {
 PHP
 
 ########################################
-# 4. PHP Compatibility (PHP 7.4)
+# 4. PHP Compatibility (configurable PHP version)
 ########################################
 
-echo "➡️  Running PHPCompatibility (PHP 7.4)..."
+echo "➡️  Running PHPCompatibility (PHP $PHP_VERSION)..."
 
 phpcs "$PLUGIN_ROOT" \
   --standard=PHPCompatibility \
-  --runtime-set testVersion 7.4 \
+  --runtime-set testVersion "$PHP_VERSION" \
   --extensions=php \
   --ignore=*/vendor/*,*/node_modules/*,*/.git/*,*/qa-reports/*,*/dist/*,*/tests/* \
   --report=full \
@@ -126,18 +161,18 @@ echo "➡️  Scanning high-risk functions..."
 
 # Scan for exec only in PHP files
 grep -R --include="*.php" -E "\bexec\s*\(" "$PLUGIN_ROOT" \
-  | grep -vE "/(vendor|node_modules|tests|dist|build|qa-reports)/" \
+  | grep -vE "/(vendor|node_modules|tests|dist|build|qa-reports)/|readme\.txt" \
   > "$REPORT_DIR/high-risk-functions.txt" || true
 
 # Scan for other high-risk functions in all files
 grep -R -E "\b(eval|shell_exec|passthru|system|popen|proc_open|base64_decode)\s*\(" "$PLUGIN_ROOT" \
-  | grep -vE "/(vendor|node_modules|tests|dist|build|qa-reports)/" \
+  | grep -vE "/(vendor|node_modules|tests|dist|build|qa-reports)/|readme\.txt" \
   >> "$REPORT_DIR/high-risk-functions.txt" || true
 
 # Check if high-risk functions exist
 if [ -s "$REPORT_DIR/high-risk-functions.txt" ]; then
     SKIP_ACTIVATION=true
-    echo "⚠️ High-risk functions detected. Skipping activation/deactivation tests."
+    echo "⚠️  High-risk functions detected. Skipping activation/deactivation tests."
 else
     SKIP_ACTIVATION=false
 fi
@@ -359,7 +394,7 @@ if [ "$SKIP_ACTIVATION" != true ]; then
 
     echo "✅ Plugin activation/deactivation check passed"
 else
-    echo "⚠️ Plugin activation/deactivation check skipped due to high-risk functions"
+    echo "⚠️  Plugin activation/deactivation check skipped due to high-risk functions"
 fi
 
 
